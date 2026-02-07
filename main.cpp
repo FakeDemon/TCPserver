@@ -4,13 +4,25 @@
 #include<sys/socket.h>
 #include<netinet/in.h>
 #include<unistd.h>
+#include<fcntl.h>
 
 
 #define MAX_EVENTS 10
 #define PORT 8080
 #define BUFFER_SIZE 1024
 
-
+int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        std::cout << "Failed to get file descriptor flags" << std::endl;
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        std::cout << "Failed to set non-blocking mode" << std::endl;
+        return -1;
+    }
+    return 0;
+}
 
 int main() {
 
@@ -86,6 +98,11 @@ int main() {
                     continue;  
                 }
 
+                if (set_nonblocking(conn_sock) < 0) {
+                    close(conn_sock);
+                    continue;  
+                }
+
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = conn_sock;
                 rt = epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock, &ev); 
@@ -96,15 +113,27 @@ int main() {
                 }
             } else {
                 char buffer[BUFFER_SIZE];
-                int bytes = recv(events[i].data.fd, buffer, BUFFER_SIZE, 0);
+                int fd = events[i].data.fd;
 
-                if (bytes <= 0) {
-                    close(events[i].data.fd);
-                    continue;  
-                } else {
-                    buffer[bytes] = '\0';
-                    std::cout << "Received data: " << buffer << std::endl;
-                    write(events[i].data.fd, buffer, bytes);
+                while (true) {
+                    int bytes = recv(fd, buffer, BUFFER_SIZE, 0);
+
+                    if (bytes < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break;  
+                        }
+                        std::cout << "Failed to read from socket" << std::endl;
+                        close(fd);
+                        break;  
+                    } else if (bytes == 0) {
+                        std::cout << "Client disconnected" << std::endl;
+                        close(fd);
+                        break;  
+                    } else {
+                        buffer[bytes] = '\0';
+                        std::cout << "Received: " << buffer << std::endl;
+                        send(fd, buffer, bytes, 0);
+                    }
                 }
             }
         }

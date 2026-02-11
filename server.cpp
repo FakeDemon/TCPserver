@@ -9,16 +9,31 @@
 #include <cstring>
 #include <vector>
 #include <unordered_map>
-
+#include <atomic>
+#include <csignal>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <fcntl.h>
 
-constexpr int MAX_EVENTS = 10;
-constexpr int PORT = 8080;
-constexpr int BUFFER_SIZE = 1024;
+const constexpr int MAX_EVENTS = 10;
+const constexpr int PORT = 8080;
+const constexpr int BUFFER_SIZE = 1024;
+
+std::atomic<bool> running{true}; // 控制服务器运行状态，可以通过信号处理函数修改这个变量来优雅地关闭服务器
+
+// 信号处理函数
+void signal_handler(int signum) {
+    running.store(false, std::memory_order_release);
+}
+
+void setup_signal_handlers() {
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, signal_handler);   // Ctrl+C
+    signal(SIGTERM, signal_handler);  // kill 命令
+    signal(SIGHUP, signal_handler);   // 终端断开
+}
 
 // RAII fd
 class FileDescriptor {
@@ -211,6 +226,8 @@ void handle_read(int epfd, Connection& c) {
 
 int main() {
 
+    setup_signal_handlers(); // 设置信号处理函数
+
     FileDescriptor listen_sock{socket(AF_INET, SOCK_STREAM, 0)};
     if (!listen_sock.valid()) {
         std::cerr << "Failed to create socket" << std::endl;
@@ -252,15 +269,15 @@ int main() {
 
     std::unordered_map<int, Connection> connections; // fd -> Connection
     std::array<epoll_event, MAX_EVENTS> events{};
-    while (true) {
-        int nfds = epoll_wait(epollfd.get(), events.data(), MAX_EVENTS, -1);
+    while (running.load(std::memory_order_acquire)) {
+        int nfds = epoll_wait(epollfd.get(), events.data(), MAX_EVENTS, 1000); // 1秒超时，允许检查运行状态
 
         if (nfds < 0) {
             if (errno == EINTR) { // 被信号中断，继续等待
                 continue;
             }
             std::cerr << "Failed to wait for events" << std::endl;
-            return 1;  
+            break;
         }
 
         for (int i = 0; i < nfds; ++i) {
@@ -325,6 +342,16 @@ int main() {
             }
         }
     }
+
+    std::cout << "Server is shutting down..." << std::endl;
+
+    for (auto& [fd, conn] : connections) {
+        std::cout << "Closing connection: fd=" << fd << std::endl;
+        epoll_ctl(epollfd.get(), EPOLL_CTL_DEL, fd, nullptr);
+        close(fd);
+    }
+
+    std::cout << "All connections closed. Goodbye!" << std::endl;
 
     return 0;
 }
